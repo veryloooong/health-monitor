@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:latest
+    container_name: mosquitto
+    restart: unless-stopped
+    ports:
+      - "1883:1883" # Standard MQTT port
+      - "9001:9001" # MQTT over WebSockets port
+    volumes:
+      - ./config/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - ./config/pwfile:/mosquitto/config/pwfile
+      # You might also want to mount a data volume for persistence if using aacls
+      # - ./data:/mosquitto/data
+      # - ./log:/mosquitto/log
+    # user: "0:0" # Run as root inside the container to avoid UID/GID mapping issues
