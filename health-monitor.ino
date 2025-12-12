@@ -1,84 +1,131 @@
+#include <WiFi.h>
+#include <PubSubClient.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
 
-// --- CONFIGURATION ---
-#define MQ3_PIN 36     // MQ-3 Analog Output -> GPIO 36 (VP)
-#define ONE_WIRE_BUS 4 // DS18B20 Data Pin -> GPIO 4
+// defines
+#define MQ3_PIN 36
+#define ONE_WIRE_BUS 4
+#define MESSAGE_TIME 3000
 
-// --- OBJECTS ---
-OneWire oneWire(ONE_WIRE_BUS);
-DallasTemperature sensors(&oneWire);
+// objects
+WiFiClient wifi_client;
+PubSubClient client(wifi_client);
+OneWire one_wire(ONE_WIRE_BUS);
+DallasTemperature sensors(&one_wire);
 
-// --- VARIABLES ---
-int mq3_baseline = 4095; // Dynamic baseline for alcohol (starts high)
+// variables
+int mq3_baseline = 4095;
+long last_message_time = 0;
+
+const char *wifi_name = "Xiaomi 15";
+const char *wifi_pass = "12345678999";
+const char *mqtt_server = "10.109.83.181";
+
+void wifi_setup()
+{
+  delay(10);
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(wifi_name);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(wifi_name, wifi_pass);
+
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+}
+
+void mqtt_reconnect()
+{
+  while (!client.connected())
+  {
+    Serial.print("Attempting MQTT connection...");
+    if (client.connect("ESP32HealthTracker"))
+    {
+      Serial.println("connected");
+    }
+    else
+    {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+      delay(5000);
+    }
+  }
+}
 
 void setup()
 {
   Serial.begin(115200);
-
-  // Setup MQ-3
   analogReadResolution(12);
-
-  // Setup DS18B20
   sensors.begin();
 
-  Serial.println("Sensors Initializing...");
-  Serial.println("Note: If MQ-3 readings drift up, press the RST button to recalibrate.");
-  delay(2000);
+  wifi_setup();
+  client.setServer(mqtt_server, 1883);
 }
 
 void loop()
 {
-  // 1. READ TEMPERATURE (DS18B20)
-  sensors.requestTemperatures();
-  float tempC = sensors.getTempCByIndex(0);
-
-  // 2. READ ALCOHOL (MQ-3)
-  int sensorValue = analogRead(MQ3_PIN);
-
-  // Dynamic Baseline Logic for MQ-3
-  // Only updates if value goes LOWER (finding cleaner air)
-  if (sensorValue < mq3_baseline)
+  if (!client.connected())
   {
-    mq3_baseline = sensorValue;
+    mqtt_reconnect();
   }
+  client.loop();
 
-  // 3. PRINT RESULTS
-  // Print Temperature
-  Serial.print("Temp: ");
-  if (tempC == -127.00)
+  long now = millis();
+  if (now - last_message_time > MESSAGE_TIME)
   {
-    Serial.print("Error");
-  }
-  else
-  {
-    Serial.print(tempC);
-    Serial.print("C");
-  }
+    last_message_time = now;
 
-  Serial.print(" | ");
+    // read details
+    sensors.requestTemperatures();
+    float temp_raw = sensors.getTempCByIndex(0);
+    int mq3_value = analogRead(MQ3_PIN);
 
-  // Print Alcohol Status
-  Serial.print("Alc: ");
-  Serial.print(sensorValue);
-  Serial.print(" (Base: ");
-  Serial.print(mq3_baseline);
-  Serial.print(") -> ");
+    if (mq3_value < mq3_baseline)
+      mq3_baseline = mq3_value;
 
-  // --- UPDATED THRESHOLDS (WIDER BUFFER) ---
-  // Increased buffer from 150 to 400 to ignore thermal drift
-  if (sensorValue < (mq3_baseline + 400))
-  {
-    Serial.println("Clean Air");
-  }
-  else if (sensorValue >= (mq3_baseline + 400) && sensorValue < (mq3_baseline + 2000))
-  {
-    Serial.println("DETECTED (Light)");
-  }
-  else
-  {
-    Serial.println("HIGH CONCENTRATION!");
-  }
+    float temp_value = temp_raw;
+    if (temp_raw < 20.0)
+      temp_value += 5.5;
 
-  delay(1000);
+    String payload = "{";
+
+    // add temp
+    payload += "\"temp\":";
+    if (temp_raw == -127)
+      payload += "null";
+    else
+      payload += String(temp_value);
+    payload += ",";
+
+    // add alcohol
+    payload += "\"alcohol\":";
+    payload += String(mq3_value);
+    payload += ",";
+
+    // add body status
+    payload += "\"status\":\"";
+    if (mq3_value < (mq3_baseline + 400))
+      payload += "Clean";
+    else if (mq3_value < (mq3_baseline + 2000))
+      payload += "Light";
+    else
+      payload += "Heavy";
+    payload += "\"}";
+
+    // send to mqtt broker
+    Serial.print("Payload: ");
+    Serial.println(payload);
+    client.publish("health/stats", payload.c_str());
+  }
 }
