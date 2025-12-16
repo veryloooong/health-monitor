@@ -1,12 +1,12 @@
-#include <WiFi.h>
-#include <PubSubClient.h>
-#include <OneWire.h>
 #include <DallasTemperature.h>
+#include <OneWire.h>
+#include <PubSubClient.h>
+#include <WiFi.h>
 
 // defines
 #define MQ3_PIN 36
 #define ONE_WIRE_BUS 4
-#define MESSAGE_TIME 3000
+#define MESSAGE_TIME 2000
 
 // objects
 WiFiClient wifi_client;
@@ -22,40 +22,33 @@ const char *wifi_name = "Xiaomi 15";
 const char *wifi_pass = "12345678999";
 const char *mqtt_server = "10.109.83.181";
 
-void wifi_setup()
-{
+void wifi_setup() {
   delay(10);
   Serial.println();
-  Serial.print("Connecting to ");
+  Serial.print("[*] Connecting to ");
   Serial.println(wifi_name);
 
   WiFi.mode(WIFI_STA);
   WiFi.begin(wifi_name, wifi_pass);
 
-  while (WiFi.status() != WL_CONNECTED)
-  {
+  while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
 
   Serial.println("");
-  Serial.println("WiFi connected");
-  Serial.println("IP address: ");
+  Serial.println("[+] WiFi connected");
+  Serial.print("[*] IP address: ");
   Serial.println(WiFi.localIP());
 }
 
-void mqtt_reconnect()
-{
-  while (!client.connected())
-  {
-    Serial.print("Attempting MQTT connection...");
-    if (client.connect("ESP32HealthTracker"))
-    {
-      Serial.println("connected");
-    }
-    else
-    {
-      Serial.print("failed, rc=");
+void mqtt_reconnect() {
+  while (!client.connected()) {
+    Serial.print("[*] Attempting MQTT connection...");
+    if (client.connect("ESP32HealthTracker")) {
+      Serial.println("[+] connected");
+    } else {
+      Serial.print("[-] failed, rc=");
       Serial.print(client.state());
       Serial.println(" try again in 5 seconds");
       delay(5000);
@@ -63,8 +56,7 @@ void mqtt_reconnect()
   }
 }
 
-void setup()
-{
+void setup() {
   Serial.begin(115200);
   analogReadResolution(12);
   sensors.begin();
@@ -73,17 +65,14 @@ void setup()
   client.setServer(mqtt_server, 1883);
 }
 
-void loop()
-{
-  if (!client.connected())
-  {
+void loop() {
+  if (!client.connected()) {
     mqtt_reconnect();
   }
   client.loop();
 
   long now = millis();
-  if (now - last_message_time > MESSAGE_TIME)
-  {
+  if (now - last_message_time > MESSAGE_TIME) {
     last_message_time = now;
 
     // read details
@@ -124,8 +113,15 @@ void loop()
     payload += "\"}";
 
     // send to mqtt broker
-    Serial.print("Payload: ");
+    bool success = client.publish("health/stats", payload.c_str());
+    if (success) {
+      Serial.println("[+] Message sent successfully");
+    } else {
+      Serial.println("[-] Message send failed");
+    }
+
+    // log payload
+    Serial.print("[*] Payload: ");
     Serial.println(payload);
-    client.publish("health/stats", payload.c_str());
   }
 }
