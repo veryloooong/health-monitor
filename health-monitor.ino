@@ -25,12 +25,11 @@ OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 MAX30105 particleSensor;
 
-// --- 4. GLOBAL VARIABLES ---
 // MQ-3
 int mq3_baseline = 4095;
 
 // MAX30102
-const byte RATE_SIZE = 4;
+const byte RATE_SIZE = 6; // Increased from 4 to 6 for smoother averages
 byte rates[RATE_SIZE];
 byte rateSpot = 0;
 long lastBeat = 0;
@@ -96,6 +95,10 @@ void setup()
 
   // 2. Setup DS18B20
   sensors.begin();
+  // CRITICAL FIX: Don't wait 750ms for temp. Return immediately.
+  sensors.setWaitForConversion(false);
+  // Start the first conversion now, so data is ready for the first loop
+  sensors.requestTemperatures();
 
   // 3. Setup MAX30102
   if (!particleSensor.begin(Wire, I2C_SPEED_FAST))
@@ -118,8 +121,9 @@ void setup()
 
 void loop()
 {
-  // --- CRITICAL LOOP: HEART RATE ---
-  // This must run fast (every loop) to detect beats
+  // --- CRITICAL FAST LOOP: HEART RATE ---
+  // This must run fast (every loop) to detect beats.
+  // With Async Temp enabled, this loop is no longer blocked!
   long irValue = particleSensor.getIR();
 
   if (checkForBeat(irValue) == true)
@@ -155,9 +159,13 @@ void loop()
     }
     client.loop();
 
-    // 1. Read Temp
-    sensors.requestTemperatures();
+    // 1. Read Temp (The conversion happened during the last 2 seconds)
+    // We don't call requestTemperatures() here yet. We just read the result.
     float rawTemp = sensors.getTempCByIndex(0);
+
+    // Start the NEXT conversion (It will happen in the background)
+    sensors.requestTemperatures();
+
     float displayTemp = rawTemp;
 
     // "Human Core" estimation
@@ -180,10 +188,9 @@ void loop()
       alcStatus = "High";
 
     // 4. Determine Finger Status
-    String fingerStatus = (irValue > 50000) ? "Yes" : "No";
+    String fingerStatus = (irValue > 50000) ? "true" : "false";
 
     // 5. Construct JSON Payload
-    // Format: {"temp": 36.5, "alcohol": 1200, "status": "Clean", "bpm": 72, "finger": "Yes"}
     String payload = "{";
     payload += "\"temp\":";
     payload += String(displayTemp);
@@ -197,26 +204,24 @@ void loop()
     payload += "\"bpm\":";
     payload += String(beatAvg);
     payload += ",";
-    payload += "\"finger\":\"";
+    payload += "\"finger\":";
     payload += fingerStatus;
-    payload += "\"";
     payload += "}";
 
     // 6. Publish to MQTT
     client.publish("health/stats", payload.c_str());
 
     // 7. Print to Serial (Plotter Friendly)
-    // Label:Value format
-    Serial.print("");
+    Serial.print("Temp:");
     Serial.print(displayTemp);
     Serial.print(",");
-    Serial.print("");
+    Serial.print("Alc:");
     Serial.print(alcValue);
     Serial.print(",");
-    Serial.print("");
+    Serial.print("BPM:");
     Serial.print(beatAvg);
     Serial.print(",");
-    Serial.print("");
+    Serial.print("IR:");
     Serial.println(irValue);
   }
 }
