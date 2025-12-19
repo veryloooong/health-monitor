@@ -14,7 +14,7 @@ For the board:
 For the MQTT server:
 
 ```sh
-docker compose -p server/ up
+docker compose -p server/ up -d
 ```
 
 For the web client: Just open the file in the browser

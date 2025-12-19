@@ -1,28 +1,6 @@
 {
+  "format_on_save": "off",
   "file_types": {
     "C++": ["ino"]
-  },
-  "languages": {
-    "C++": {
-      "language_servers": ["arduino-language-server", "!clangd", "..."]
-    }
-  },
-  "lsp": {
-    "arduino-language-server": {
-      "binary": {
-        "path": "arduino-language-server",
-        "arguments": [
-          "-clangd",
-          "/etc/profiles/per-user/veryloooong/bin/clangd",
-          "-cli",
-          "/etc/profiles/per-user/veryloooong/bin/arduino-cli",
-          "-cli-config",
-          "/home/veryloooong/.arduino15/arduino-cli.yaml",
-          "-fqbn",
-          "esp32:esp32:esp32"
-        ]
-      },
-      "enable_lsp_tasks": true
-    }
   }
 }
