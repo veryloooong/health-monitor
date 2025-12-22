@@ -1,46 +1,56 @@
-#include <WiFi.h>
-#include <PubSubClient.h>
-#include <OneWire.h>
-#include <DallasTemperature.h>
-#include <Wire.h>
 #include "MAX30105.h"
 #include "heartRate.h"
-#include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
+#include "soc/soc.h"
+#include <DallasTemperature.h>
+#include <OneWire.h>
+#include <PubSubClient.h>
+#include <WiFi.h>
+#include <Wire.h>
 
-// --- 1. CONFIGURATION (EDIT THIS) ---
-const char *ssid = "Xiaomi 15";            // <--- WIFI NAME
-const char *password = "12345678999";      // <--- WIFI PASSWORD
-const char *mqtt_server = "10.109.83.181"; // <--- PC IP ADDRESS
+// wifi config
+const char *ssid = "Xiaomi 15";            // WIFI NAME
+const char *password = "12345678999";      // WIFI PASSWORD
+const char *mqtt_server = "10.109.83.181"; // PC IP ADDRESS
 
-// --- 2. PIN DEFINITIONS ---
-#define MQ3_PIN 36     // MQ-3 Analog (Voltage Divider) -> GPIO 36
-#define ONE_WIRE_BUS 4 // DS18B20 Data -> GPIO 4
-// MAX30102 uses default I2C: SDA=21, SCL=22
+// defines
+#define MQ3_PIN 36                 // MQ-3 Analog (Voltage Divider) -> GPIO 36
+#define ONE_WIRE_BUS 4             // DS18B20 Data -> GPIO 4
+#define MESSAGE_DELAY_TIME_MS 2000 // 2 seconds
+#define FINGER_DETECT_THRESHOLD 50000 // IR value threshold for finger detection
+#define SPO2_SAMPLE_SIZE 100          // Number of samples for SpO2 calculation
 
-// --- 3. OBJECTS ---
-WiFiClient espClient;
-PubSubClient client(espClient);
-OneWire oneWire(ONE_WIRE_BUS);
-DallasTemperature sensors(&oneWire);
-MAX30105 particleSensor;
+// objects
+WiFiClient wifi_client;
+PubSubClient mqtt_client(wifi_client);
+OneWire onewire(ONE_WIRE_BUS);
+DallasTemperature sensors(&onewire);
+MAX30105 particle_sensor;
 
 // MQ-3
 int mq3_baseline = 4095;
 
-// MAX30102
-const byte RATE_SIZE = 6; // Increased from 4 to 6 for smoother averages
+// MAX30102 heart rate
+const byte RATE_SIZE = 6;
 byte rates[RATE_SIZE];
-byte rateSpot = 0;
-long lastBeat = 0;
-float beatsPerMinute;
-int beatAvg = 0;
+byte rate_spot = 0;
+long last_beat = 0;
+float bpm_current;
+int bpm_average = 0;
+
+// MAX30102 SpO2 variables
+double average_red = 0;
+double average_ir = 0;
+double sum_red_rms = 0;
+double sum_ir_rms = 0;
+double spo2 = 0;
+double e_spo2 = 95.0; // Initial estimated SpO2
+int spo2_counter = 0;
 
 // Timers
-long lastMsg = 0;
+long last_msg_time = 0;
 
-void setup_wifi()
-{
+void setup_wifi() {
   delay(10);
   Serial.println();
   Serial.print("Connecting to WiFi: ");
@@ -49,8 +59,7 @@ void setup_wifi()
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
 
-  while (WiFi.status() != WL_CONNECTED)
-  {
+  while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
@@ -60,34 +69,27 @@ void setup_wifi()
   Serial.println(WiFi.localIP());
 }
 
-void reconnect()
-{
-  // Non-blocking reconnect would be better, but for simplicity we block briefly
-  if (!client.connected())
-  {
+void reconnect_wifi() {
+  if (!mqtt_client.connected()) {
     Serial.print("Attempting MQTT connection...");
-    if (client.connect("ESP32_Health_Hub"))
-    {
+    if (mqtt_client.connect("ESP32_Health_Hub")) {
       Serial.println("connected");
-    }
-    else
-    {
+    } else {
       Serial.print("failed, rc=");
-      Serial.print(client.state());
+      Serial.print(mqtt_client.state());
       Serial.println(" (will try again next loop)");
     }
   }
 }
 
-void setup()
-{
+void setup() {
   // Disable Brownout Detector to prevent WiFi/MQ-3 crashes
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
 
   Serial.begin(115200);
 
   // Power stabilization delay
-  Serial.println("System starting... wait 2s for power to stabilize.");
+  Serial.println("System starting... wait 2s...");
   delay(2000);
 
   // 1. Setup MQ-3
@@ -95,133 +97,158 @@ void setup()
 
   // 2. Setup DS18B20
   sensors.begin();
-  // CRITICAL FIX: Don't wait 750ms for temp. Return immediately.
   sensors.setWaitForConversion(false);
-  // Start the first conversion now, so data is ready for the first loop
   sensors.requestTemperatures();
 
   // 3. Setup MAX30102
-  if (!particleSensor.begin(Wire, I2C_SPEED_FAST))
-  {
+  if (!particle_sensor.begin(Wire, I2C_SPEED_FAST)) {
     Serial.println("MAX30102 not found. Check wiring/power.");
-    // We continue anyway so the other sensors still work
-  }
-  else
-  {
-    Serial.println("MAX30102 Found.");
-    particleSensor.setup();
-    particleSensor.setPulseAmplitudeRed(0x0A); // Low Red LED current
-    particleSensor.setPulseAmplitudeGreen(0);
+  } else {
+    Serial.println("MAX30102 found.");
+    particle_sensor.setup();
+    particle_sensor.setPulseAmplitudeRed(0x0A); // Low Red LED current
+    particle_sensor.setPulseAmplitudeGreen(0);
   }
 
   // 4. Setup Network
   setup_wifi();
-  client.setServer(mqtt_server, 1883);
+  mqtt_client.setServer(mqtt_server, 1883);
 }
 
-void loop()
-{
-  // --- CRITICAL FAST LOOP: HEART RATE ---
-  // This must run fast (every loop) to detect beats.
-  // With Async Temp enabled, this loop is no longer blocked!
-  long irValue = particleSensor.getIR();
+void loop() {
+  // Fast loop for heart rate & SpO2
+  long ir_value = particle_sensor.getIR();
+  long red_value = particle_sensor.getRed();
 
-  if (checkForBeat(irValue) == true)
-  {
-    long delta = millis() - lastBeat;
-    lastBeat = millis();
+  // 1. Heart Rate Logic
+  if (checkForBeat(ir_value) == true) {
+    long delta = millis() - last_beat;
+    last_beat = millis();
 
-    beatsPerMinute = 60 / (delta / 1000.0);
+    bpm_current = 60 / (delta / 1000.0);
 
-    if (beatsPerMinute < 255 && beatsPerMinute > 20)
-    {
-      rates[rateSpot++] = (byte)beatsPerMinute;
-      rateSpot %= RATE_SIZE;
+    if (bpm_current < 255 && bpm_current > 20) {
+      rates[rate_spot++] = (byte)bpm_current;
+      rate_spot %= RATE_SIZE;
 
-      beatAvg = 0;
+      bpm_average = 0;
       for (byte x = 0; x < RATE_SIZE; x++)
-        beatAvg += rates[x];
-      beatAvg /= RATE_SIZE;
+        bpm_average += rates[x];
+      bpm_average /= RATE_SIZE;
     }
   }
 
-  // --- SLOW LOOP: MQTT & OTHER SENSORS ---
-  // Run this every 2 seconds
+  // 2. SpO2 Logic (Continuous RMS method)
+  if (ir_value > FINGER_DETECT_THRESHOLD) {
+    // Remove DC component (simple IIR filter)
+    average_red = 0.95 * average_red + 0.05 * red_value;
+    average_ir = 0.95 * average_ir + 0.05 * ir_value;
+
+    double ac_red = red_value - average_red;
+    double ac_ir = ir_value - average_ir;
+
+    // Accumulate squared AC (for RMS)
+    sum_red_rms += ac_red * ac_red;
+    sum_ir_rms += ac_ir * ac_ir;
+    spo2_counter++;
+
+    // Calculate SpO2 every N samples
+    if (spo2_counter >= SPO2_SAMPLE_SIZE) {
+      double red_rms = sqrt(sum_red_rms / SPO2_SAMPLE_SIZE);
+      double ir_rms = sqrt(sum_ir_rms / SPO2_SAMPLE_SIZE);
+
+      // Ratio of Ratios
+      double r = (red_rms / average_red) / (ir_rms / average_ir);
+
+      // Empirical formula for SpO2
+      spo2 = 110.0 - 18.0 * r;
+
+      // Limit to realistic human range (80-100)
+      if (spo2 > 100) spo2 = 100;
+      if (spo2 < 80) spo2 = 80;
+
+      // Smooth the result
+      e_spo2 = 0.9 * e_spo2 + 0.1 * spo2;
+
+      // Reset counters
+      sum_red_rms = 0;
+      sum_ir_rms = 0;
+      spo2_counter = 0;
+    }
+  } else {
+    // Reset averages if finger removed
+    e_spo2 = 0.0;
+    bpm_average = 0;
+  }
+
+  // Slow loop for other sensors and MQTT
   long now = millis();
-  if (now - lastMsg > 2000)
-  {
-    lastMsg = now;
+  if (now - last_msg_time > MESSAGE_DELAY_TIME_MS) {
+    last_msg_time = now;
 
     // Check MQTT Connection
-    if (!client.connected())
-    {
-      reconnect();
+    if (!mqtt_client.connected()) {
+      reconnect_wifi();
     }
-    client.loop();
+    mqtt_client.loop();
 
-    // 1. Read Temp (The conversion happened during the last 2 seconds)
-    // We don't call requestTemperatures() here yet. We just read the result.
-    float rawTemp = sensors.getTempCByIndex(0);
-
-    // Start the NEXT conversion (It will happen in the background)
+    float temp_raw = sensors.getTempCByIndex(0);
     sensors.requestTemperatures();
 
-    float displayTemp = rawTemp;
+    float temp_display = temp_raw;
 
     // "Human Core" estimation
-    if (rawTemp > 28.0)
-      displayTemp = rawTemp + 5.5;
-    if (rawTemp == -127.00)
-      displayTemp = 0.0; // Error handling
+    if (temp_raw > 28.0)
+      temp_display = temp_raw + 5.5;
+    if (temp_raw == -127.00)
+      temp_display = 0.0; // Error handling
 
     // 2. Read Alcohol
-    int alcValue = analogRead(MQ3_PIN);
+    int alcohol_value = analogRead(MQ3_PIN);
     // Dynamic Baseline (Auto-Calibration)
-    if (alcValue < mq3_baseline)
-      mq3_baseline = alcValue;
+    if (alcohol_value < mq3_baseline)
+      mq3_baseline = alcohol_value;
 
     // 3. Determine Alcohol Status
-    String alcStatus = "Clean";
-    if (alcValue >= (mq3_baseline + 400) && alcValue < (mq3_baseline + 2000))
-      alcStatus = "Detected";
-    else if (alcValue >= (mq3_baseline + 2000))
-      alcStatus = "High";
+    String alcohol_status = "Clean";
+    if (alcohol_value >= (mq3_baseline + 400) && alcohol_value < (mq3_baseline + 2000))
+      alcohol_status = "Detected";
+    else if (alcohol_value >= (mq3_baseline + 2000))
+      alcohol_status = "High";
 
-    // 4. Determine Finger Status
-    String fingerStatus = (irValue > 50000) ? "true" : "false";
+    String finger_status = (ir_value > FINGER_DETECT_THRESHOLD) ? "true" : "false";
 
-    // 5. Construct JSON Payload
     String payload = "{";
     payload += "\"temp\":";
-    payload += String(displayTemp);
+    payload += String(temp_display);
     payload += ",";
     payload += "\"alcohol\":";
-    payload += String(alcValue);
+    payload += String(alcohol_value);
     payload += ",";
     payload += "\"status\":\"";
-    payload += alcStatus;
+    payload += alcohol_status;
     payload += "\",";
     payload += "\"bpm\":";
-    payload += String(beatAvg);
+    payload += String(bpm_average);
+    payload += ",";
+    payload += "\"spo2\":";
+    payload += String(e_spo2);
     payload += ",";
     payload += "\"finger\":";
-    payload += fingerStatus;
+    payload += finger_status;
     payload += "}";
 
-    // 6. Publish to MQTT
-    client.publish("health/stats", payload.c_str());
+    mqtt_client.publish("health/stats", payload.c_str());
 
-    // 7. Print to Serial (Plotter Friendly)
-    Serial.print("Temp:");
-    Serial.print(displayTemp);
+    // print to serial (CSV format without labels)
+    Serial.print(temp_display);
     Serial.print(",");
-    Serial.print("Alc:");
-    Serial.print(alcValue);
+    Serial.print(alcohol_value);
     Serial.print(",");
-    Serial.print("BPM:");
-    Serial.print(beatAvg);
+    Serial.print(bpm_average);
     Serial.print(",");
-    Serial.print("IR:");
-    Serial.println(irValue);
+    Serial.print(e_spo2);
+    Serial.print(",");
+    Serial.println(ir_value);
   }
 }

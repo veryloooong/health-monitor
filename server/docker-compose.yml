@@ -11,7 +11,15 @@ services:
     volumes:
       - ./config/mosquitto.conf:/mosquitto/config/mosquitto.conf
       - ./config/pwfile:/mosquitto/config/pwfile
-      # You might also want to mount a data volume for persistence if using aacls
-      # - ./data:/mosquitto/data
-      # - ./log:/mosquitto/log
-    # user: "0:0" # Run as root inside the container to avoid UID/GID mapping issues
+
+  logger:
+    build:
+      context: ./logger # Context relative to this compose file
+    container_name: health_logger
+    restart: unless-stopped
+    depends_on:
+      - mosquitto
+    volumes:
+      - ./data:/app/data # Maps internal /app/data to local server/data folder
+    environment:
+      PYTHONUNBUFFERED: 1

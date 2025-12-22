@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Health Tracker Dashboard</title>
-    
+
     <!-- Chart.js for Graphs -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <!-- Paho MQTT Client for WebSockets -->
@@ -13,7 +13,7 @@
     <style>
         body { font-family: 'Segoe UI', sans-serif; background: #1a1a1a; color: #ecf0f1; text-align: center; margin: 0; padding: 20px; }
         .container { max-width: 1200px; margin: 0 auto; }
-        
+
         .cards { display: flex; justify-content: center; gap: 20px; margin-bottom: 30px; flex-wrap: wrap; }
         .card { background: #2c3e50; padding: 20px; border-radius: 10px; width: 200px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
         .card h2 { margin: 0; font-size: 1.2em; color: #bdc3c7; }
@@ -23,6 +23,13 @@
         .status-clean { color: #2ecc71; }
         .status-detect { color: #f1c40f; }
         .status-high { color: #e74c3c; }
+
+        .bpm-anim { animation: pulse 1s infinite; display: inline-block; }
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.1); color: #e74c3c; }
+            100% { transform: scale(1); }
+        }
 
         .chart-container { background: #2c3e50; padding: 20px; border-radius: 10px; height: 400px; }
     </style>
@@ -41,7 +48,7 @@
                 <span class="unit">°C</span>
             </div>
 
-            <!-- Heart Rate Card (New) -->
+            <!-- Heart Rate Card -->
             <div class="card">
                 <h2>Heart Rate</h2>
                 <div class="value">
@@ -49,6 +56,13 @@
                     <span id="heart-icon" style="font-size: 0.6em;">❤️</span>
                 </div>
                 <span class="unit">BPM</span>
+            </div>
+
+            <!-- SpO2 Card -->
+            <div class="card">
+                <h2>Oxygen (SpO2)</h2>
+                <div class="value" id="spo2-val">--</div>
+                <span class="unit">%</span>
             </div>
 
             <!-- Alcohol Card -->
@@ -83,21 +97,28 @@
             data: {
                 labels: [],
                 datasets: [{
-                    label: 'Temperature (°C)',
+                    label: 'Temp (°C)',
                     borderColor: '#e74c3c', // Red
                     backgroundColor: 'rgba(231, 76, 60, 0.1)',
                     data: [],
                     yAxisID: 'y',
                     tension: 0.4
                 }, {
-                    label: 'Heart Rate (BPM)',
+                    label: 'Heart Rate',
                     borderColor: '#9b59b6', // Purple
                     backgroundColor: 'rgba(155, 89, 182, 0.1)',
                     data: [],
                     yAxisID: 'y_bpm',
                     tension: 0.4
                 }, {
-                    label: 'Alcohol Level',
+                    label: 'SpO2 (%)',
+                    borderColor: '#2ecc71', // Green
+                    backgroundColor: 'rgba(46, 204, 113, 0.1)',
+                    data: [],
+                    yAxisID: 'y_bpm', // Share axis with BPM
+                    tension: 0.4
+                }, {
+                    label: 'Alcohol',
                     borderColor: '#3498db', // Blue
                     backgroundColor: 'rgba(52, 152, 219, 0.1)',
                     data: [],
@@ -108,36 +129,23 @@
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
-                interaction: {
-                    mode: 'index',
-                    intersect: false,
-                },
+                interaction: { mode: 'index', intersect: false },
                 scales: {
-                    y: { 
-                        type: 'linear', 
-                        display: true, 
-                        position: 'left', 
+                    y: {
+                        type: 'linear', display: true, position: 'left',
                         title: { display: true, text: 'Temp (°C)' },
-                        suggestedMin: 20, 
-                        suggestedMax: 45 
+                        suggestedMin: 20, suggestedMax: 45
                     },
                     y_bpm: {
-                        type: 'linear',
-                        display: true,
-                        position: 'right',
-                        title: { display: true, text: 'BPM' },
-                        grid: { drawOnChartArea: false }, // Avoid grid clutter
-                        suggestedMin: 40,
-                        suggestedMax: 150
+                        type: 'linear', display: true, position: 'right',
+                        title: { display: true, text: 'BPM / SpO2' },
+                        grid: { drawOnChartArea: false },
+                        suggestedMin: 40, suggestedMax: 110
                     },
-                    y1: { 
-                        type: 'linear', 
-                        display: true, 
-                        position: 'right', 
-                        title: { display: true, text: 'Alcohol (Raw)' },
-                        min: 0, 
-                        max: 4095, 
-                        grid: { drawOnChartArea: false } 
+                    y1: {
+                        type: 'linear', display: true, position: 'right',
+                        title: { display: true, text: 'Alcohol' },
+                        min: 0, max: 4095, grid: { drawOnChartArea: false }
                     }
                 }
             }
@@ -149,34 +157,26 @@
 
         client.onConnectionLost = onConnectionLost;
         client.onMessageArrived = onMessageArrived;
-
-        // Connect
-        console.log("Attempting to connect to MQTT...");
         client.connect({ onSuccess: onConnect, onFailure: onFail });
 
         function onConnect() {
             document.getElementById("connection-status").innerText = "Connected via WebSockets";
             document.getElementById("connection-status").style.color = "#2ecc71";
-            console.log("Connected to MQTT Broker");
             client.subscribe(MQTT_TOPIC);
         }
 
         function onFail(responseObject) {
-            console.log("Connection failed: " + responseObject.errorMessage);
-            document.getElementById("connection-status").innerText = "Connection Failed (Is Mosquitto running on port 9001?)";
+            document.getElementById("connection-status").innerText = "Connection Failed";
         }
 
         function onConnectionLost(responseObject) {
             if (responseObject.errorCode !== 0) {
-                console.log("Connection lost: " + responseObject.errorMessage);
                 document.getElementById("connection-status").innerText = "Connection Lost";
                 document.getElementById("connection-status").style.color = "red";
             }
         }
 
         function onMessageArrived(message) {
-            console.log("MQTT Payload Received: " + message.payloadString);
-            
             try {
                 const data = JSON.parse(message.payloadString);
                 updateDashboard(data);
@@ -186,43 +186,53 @@
         }
 
         function updateDashboard(data) {
-            // 1. Update Temperature Card
-            const tempDisplay = data.temp !== null ? parseFloat(data.temp).toFixed(1) : "Err";
-            document.getElementById("temp-val").innerText = tempDisplay;
-
-            // 2. Update Alcohol Card
+            // Update Text Cards
+            document.getElementById("temp-val").innerText = data.temp !== null ? parseFloat(data.temp).toFixed(1) : "Err";
             document.getElementById("alc-val").innerText = data.alcohol;
-            
+
             const statusEl = document.getElementById("status-val");
             statusEl.innerText = data.status;
-            statusEl.className = "value"; // reset class
+            statusEl.className = "value";
             if (data.status === "Clean") statusEl.classList.add("status-clean");
             else if (data.status === "Detected") statusEl.classList.add("status-detect");
             else statusEl.classList.add("status-high");
 
-            // 3. Update BPM Card
-            // Only show BPM if finger is detected (true) AND bpm is valid (>0)
+            // Handle BPM & SpO2 display
             let bpmDisplay = "--";
-            if (data.finger === true && data.bpm > 0) {
-                bpmDisplay = data.bpm;
-            }
-            document.getElementById("bpm-val").innerText = bpmDisplay;
+            let spo2Display = "--";
 
-            // 4. Update Chart
+            // Logic: Only show data if finger is detected (boolean check)
+            if (data.finger === true) {
+                if (data.bpm > 0) bpmDisplay = data.bpm;
+                if (data.spo2 > 0) spo2Display = parseFloat(data.spo2).toFixed(1);
+            }
+
+            document.getElementById("bpm-val").innerText = bpmDisplay;
+            document.getElementById("spo2-val").innerText = spo2Display;
+
+            // Heart Icon Animation
+            const heartIcon = document.getElementById("heart-icon");
+            if (data.finger === true) {
+                heartIcon.classList.add("bpm-anim");
+                if(data.bpm > 0) heartIcon.style.animationDuration = (60 / data.bpm) + "s";
+            } else {
+                heartIcon.classList.remove("bpm-anim");
+            }
+
+            // Update Chart
             const timeLabel = new Date().toLocaleTimeString();
-            
+
             if (healthChart.data.labels.length > 30) {
-                healthChart.data.labels.shift(); 
-                healthChart.data.datasets[0].data.shift();
-                healthChart.data.datasets[1].data.shift();
-                healthChart.data.datasets[2].data.shift();
+                healthChart.data.labels.shift();
+                healthChart.data.datasets.forEach(ds => ds.data.shift());
             }
 
             healthChart.data.labels.push(timeLabel);
             healthChart.data.datasets[0].data.push(data.temp);    // Temp
             healthChart.data.datasets[1].data.push(data.bpm);     // BPM
-            healthChart.data.datasets[2].data.push(data.alcohol); // Alcohol
-            
+            healthChart.data.datasets[2].data.push(data.spo2);    // SpO2
+            healthChart.data.datasets[3].data.push(data.alcohol); // Alcohol
+
             healthChart.update();
         }
     </script>
