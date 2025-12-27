@@ -9,14 +9,14 @@
 #include <Wire.h>
 
 // wifi config
-const char *ssid = "Xiaomi 15";            // WIFI NAME
-const char *password = "12345678999";      // WIFI PASSWORD
-const char *mqtt_server = "10.109.83.181"; // PC IP ADDRESS
+const char *ssid = "Xiaomi 15";             // WIFI NAME
+const char *password = "12345678999";       // WIFI PASSWORD
+const char *mqtt_server = "10.247.128.181"; // PC IP ADDRESS
 
 // defines
-#define MQ3_PIN 36                 // MQ-3 Analog (Voltage Divider) -> GPIO 36
-#define ONE_WIRE_BUS 4             // DS18B20 Data -> GPIO 4
-#define MESSAGE_DELAY_TIME_MS 2000 // 2 seconds
+#define MQ3_PIN 36                    // MQ-3 Analog (Voltage Divider) -> GPIO 36
+#define ONE_WIRE_BUS 4                // DS18B20 Data -> GPIO 4
+#define MESSAGE_DELAY_TIME_MS 2000    // 2 seconds
 #define FINGER_DETECT_THRESHOLD 50000 // IR value threshold for finger detection
 #define SPO2_SAMPLE_SIZE 100          // Number of samples for SpO2 calculation
 
@@ -50,7 +50,8 @@ int spo2_counter = 0;
 // Timers
 long last_msg_time = 0;
 
-void setup_wifi() {
+void setup_wifi()
+{
   delay(10);
   Serial.println();
   Serial.print("Connecting to WiFi: ");
@@ -59,7 +60,8 @@ void setup_wifi() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
 
-  while (WiFi.status() != WL_CONNECTED) {
+  while (WiFi.status() != WL_CONNECTED)
+  {
     delay(500);
     Serial.print(".");
   }
@@ -69,12 +71,17 @@ void setup_wifi() {
   Serial.println(WiFi.localIP());
 }
 
-void reconnect_wifi() {
-  if (!mqtt_client.connected()) {
+void reconnect_wifi()
+{
+  if (!mqtt_client.connected())
+  {
     Serial.print("Attempting MQTT connection...");
-    if (mqtt_client.connect("ESP32_Health_Hub")) {
+    if (mqtt_client.connect("ESP32_Health_Hub"))
+    {
       Serial.println("connected");
-    } else {
+    }
+    else
+    {
       Serial.print("failed, rc=");
       Serial.print(mqtt_client.state());
       Serial.println(" (will try again next loop)");
@@ -82,7 +89,8 @@ void reconnect_wifi() {
   }
 }
 
-void setup() {
+void setup()
+{
   // Disable Brownout Detector to prevent WiFi/MQ-3 crashes
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
 
@@ -101,9 +109,12 @@ void setup() {
   sensors.requestTemperatures();
 
   // 3. Setup MAX30102
-  if (!particle_sensor.begin(Wire, I2C_SPEED_FAST)) {
+  if (!particle_sensor.begin(Wire, I2C_SPEED_FAST))
+  {
     Serial.println("MAX30102 not found. Check wiring/power.");
-  } else {
+  }
+  else
+  {
     Serial.println("MAX30102 found.");
     particle_sensor.setup();
     particle_sensor.setPulseAmplitudeRed(0x0A); // Low Red LED current
@@ -115,19 +126,22 @@ void setup() {
   mqtt_client.setServer(mqtt_server, 1883);
 }
 
-void loop() {
+void loop()
+{
   // Fast loop for heart rate & SpO2
   long ir_value = particle_sensor.getIR();
   long red_value = particle_sensor.getRed();
 
   // 1. Heart Rate Logic
-  if (checkForBeat(ir_value) == true) {
+  if (checkForBeat(ir_value) == true)
+  {
     long delta = millis() - last_beat;
     last_beat = millis();
 
     bpm_current = 60 / (delta / 1000.0);
 
-    if (bpm_current < 255 && bpm_current > 20) {
+    if (bpm_current < 255 && bpm_current > 20)
+    {
       rates[rate_spot++] = (byte)bpm_current;
       rate_spot %= RATE_SIZE;
 
@@ -139,7 +153,8 @@ void loop() {
   }
 
   // 2. SpO2 Logic (Continuous RMS method)
-  if (ir_value > FINGER_DETECT_THRESHOLD) {
+  if (ir_value > FINGER_DETECT_THRESHOLD)
+  {
     // Remove DC component (simple IIR filter)
     average_red = 0.95 * average_red + 0.05 * red_value;
     average_ir = 0.95 * average_ir + 0.05 * ir_value;
@@ -153,7 +168,8 @@ void loop() {
     spo2_counter++;
 
     // Calculate SpO2 every N samples
-    if (spo2_counter >= SPO2_SAMPLE_SIZE) {
+    if (spo2_counter >= SPO2_SAMPLE_SIZE)
+    {
       double red_rms = sqrt(sum_red_rms / SPO2_SAMPLE_SIZE);
       double ir_rms = sqrt(sum_ir_rms / SPO2_SAMPLE_SIZE);
 
@@ -164,8 +180,10 @@ void loop() {
       spo2 = 110.0 - 18.0 * r;
 
       // Limit to realistic human range (80-100)
-      if (spo2 > 100) spo2 = 100;
-      if (spo2 < 80) spo2 = 80;
+      if (spo2 > 100)
+        spo2 = 100;
+      if (spo2 < 80)
+        spo2 = 80;
 
       // Smooth the result
       e_spo2 = 0.9 * e_spo2 + 0.1 * spo2;
@@ -175,7 +193,9 @@ void loop() {
       sum_ir_rms = 0;
       spo2_counter = 0;
     }
-  } else {
+  }
+  else
+  {
     // Reset averages if finger removed
     e_spo2 = 0.0;
     bpm_average = 0;
@@ -183,11 +203,13 @@ void loop() {
 
   // Slow loop for other sensors and MQTT
   long now = millis();
-  if (now - last_msg_time > MESSAGE_DELAY_TIME_MS) {
+  if (now - last_msg_time > MESSAGE_DELAY_TIME_MS)
+  {
     last_msg_time = now;
 
     // Check MQTT Connection
-    if (!mqtt_client.connected()) {
+    if (!mqtt_client.connected())
+    {
       reconnect_wifi();
     }
     mqtt_client.loop();
