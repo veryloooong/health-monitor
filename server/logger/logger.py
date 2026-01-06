@@ -11,12 +11,14 @@ MQTT_TOPIC = "health/stats"
 # This path is internal to the Docker container
 CSV_FILE = "/app/data/health_data.csv"
 
+
 def on_connect(client, userdata, flags, rc):
     if rc == 0:
         print("Connected to Mosquitto internal network ✅")
         client.subscribe(MQTT_TOPIC)
     else:
         print(f"Failed to connect, return code {rc}")
+
 
 def on_message(client, userdata, msg):
     try:
@@ -27,7 +29,7 @@ def on_message(client, userdata, msg):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         # Determine Finger Status from Boolean
-        finger_detected = "Yes" if data.get("finger") is True else "No"
+        finger_detected = "true" if data.get("finger") is True else "false"
 
         # Prepare CSV Row
         # Includes SpO2 as well if available in your final sketch
@@ -38,24 +40,29 @@ def on_message(client, userdata, msg):
             data.get("bpm", "N/A"),
             data.get("spo2", "N/A"),
             data.get("status", "Unknown"),
-            finger_detected
+            finger_detected,
         ]
 
         # Ensure directory exists and write to CSV
         os.makedirs(os.path.dirname(CSV_FILE), exist_ok=True)
         file_exists = os.path.isfile(CSV_FILE)
 
-        with open(CSV_FILE, mode='a', newline='') as f:
+        with open(CSV_FILE, mode="a", newline="") as f:
             writer = csv.writer(f)
             # Write header if new file
             if not file_exists or os.stat(CSV_FILE).st_size == 0:
-                writer.writerow(["Timestamp", "Temp(C)", "Alcohol", "BPM", "SpO2", "Air Status", "Finger"])
+                writer.writerow(
+                    ["timestamp", "temp", "alcohol", "bpm", "spo2", "status", "finger"]
+                )
             writer.writerow(row)
 
-        print(f"Data Logged: {timestamp} | BPM: {data.get('bpm')} | Finger: {finger_detected}")
+        print(
+            f"Data Logged: {timestamp} | BPM: {data.get('bpm')} | Finger: {finger_detected}"
+        )
 
     except Exception as e:
         print(f"Logging Error: {e}")
+
 
 # Setup MQTT Client
 client = mqtt.Client()

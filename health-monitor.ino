@@ -11,7 +11,7 @@
 // wifi config
 const char *ssid = "Xiaomi 15";             // WIFI NAME
 const char *password = "12345678999";       // WIFI PASSWORD
-const char *mqtt_server = "10.247.128.181"; // PC IP ADDRESS
+const char *mqtt_server = "10.247.128.181"; // PC IP ADDRESS (Updated from your latest upload)
 
 // defines
 #define MQ3_PIN 36                    // MQ-3 Analog (Voltage Divider) -> GPIO 36
@@ -31,7 +31,7 @@ MAX30105 particle_sensor;
 int mq3_baseline = 4095;
 
 // MAX30102 heart rate
-const byte RATE_SIZE = 6;
+const byte RATE_SIZE = 10; // Increased buffer for smoother, more realistic BPM
 byte rates[RATE_SIZE];
 byte rate_spot = 0;
 long last_beat = 0;
@@ -91,12 +91,9 @@ void reconnect_wifi()
 
 void setup()
 {
-  // Disable Brownout Detector to prevent WiFi/MQ-3 crashes
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
 
   Serial.begin(115200);
-
-  // Power stabilization delay
   Serial.println("System starting... wait 2s...");
   delay(2000);
 
@@ -108,20 +105,31 @@ void setup()
   sensors.setWaitForConversion(false);
   sensors.requestTemperatures();
 
-  // 3. Setup MAX30102
+  // 3. Setup MAX30102 with High Sensitivity Settings
   if (!particle_sensor.begin(Wire, I2C_SPEED_FAST))
   {
-    Serial.println("MAX30102 not found. Check wiring/power.");
+    Serial.println("MAX30102 not found.");
   }
   else
   {
-    Serial.println("MAX30102 found.");
-    particle_sensor.setup();
-    particle_sensor.setPulseAmplitudeRed(0x0A); // Low Red LED current
-    particle_sensor.setPulseAmplitudeGreen(0);
+    Serial.println("MAX30102 found. Configuring High Sensitivity...");
+
+    // Explicit setup for Heart Rate + SpO2
+    // Power Level: 0x1F (~6.4mA) - 0x24 (~7.6mA) is the sweet spot for fingertips
+    byte ledBrightness = 0x24;
+    byte sampleAverage = 4; // Average 4 samples per read
+    byte ledMode = 2;       // Red + IR
+    int sampleRate = 400;   // Higher sample rate = better peak detection
+    int pulseWidth = 411;
+    int adcRange = 4096;
+
+    particle_sensor.setup(ledBrightness, sampleAverage, ledMode, sampleRate, pulseWidth, adcRange);
+
+    // Ensure IR LED is also powered up (essential for checkForBeat)
+    particle_sensor.setPulseAmplitudeIR(ledBrightness);
+    particle_sensor.setPulseAmplitudeRed(ledBrightness);
   }
 
-  // 4. Setup Network
   setup_wifi();
   mqtt_client.setServer(mqtt_server, 1883);
 }
@@ -140,7 +148,8 @@ void loop()
 
     bpm_current = 60 / (delta / 1000.0);
 
-    if (bpm_current < 255 && bpm_current > 20)
+    // Realistic human range check
+    if (bpm_current < 220 && bpm_current > 40)
     {
       rates[rate_spot++] = (byte)bpm_current;
       rate_spot %= RATE_SIZE;
@@ -152,43 +161,33 @@ void loop()
     }
   }
 
-  // 2. SpO2 Logic (Continuous RMS method)
+  // 2. SpO2 Logic
   if (ir_value > FINGER_DETECT_THRESHOLD)
   {
-    // Remove DC component (simple IIR filter)
     average_red = 0.95 * average_red + 0.05 * red_value;
     average_ir = 0.95 * average_ir + 0.05 * ir_value;
 
     double ac_red = red_value - average_red;
     double ac_ir = ir_value - average_ir;
 
-    // Accumulate squared AC (for RMS)
     sum_red_rms += ac_red * ac_red;
     sum_ir_rms += ac_ir * ac_ir;
     spo2_counter++;
 
-    // Calculate SpO2 every N samples
     if (spo2_counter >= SPO2_SAMPLE_SIZE)
     {
       double red_rms = sqrt(sum_red_rms / SPO2_SAMPLE_SIZE);
       double ir_rms = sqrt(sum_ir_rms / SPO2_SAMPLE_SIZE);
-
-      // Ratio of Ratios
       double r = (red_rms / average_red) / (ir_rms / average_ir);
-
-      // Empirical formula for SpO2
       spo2 = 110.0 - 18.0 * r;
 
-      // Limit to realistic human range (80-100)
       if (spo2 > 100)
         spo2 = 100;
       if (spo2 < 80)
         spo2 = 80;
 
-      // Smooth the result
       e_spo2 = 0.9 * e_spo2 + 0.1 * spo2;
 
-      // Reset counters
       sum_red_rms = 0;
       sum_ir_rms = 0;
       spo2_counter = 0;
@@ -196,9 +195,11 @@ void loop()
   }
   else
   {
-    // Reset averages if finger removed
     e_spo2 = 0.0;
     bpm_average = 0;
+    // Clear HR buffer when finger is removed to prevent old stale averages
+    for (int i = 0; i < RATE_SIZE; i++)
+      rates[i] = 0;
   }
 
   // Slow loop for other sensors and MQTT
@@ -207,31 +208,20 @@ void loop()
   {
     last_msg_time = now;
 
-    // Check MQTT Connection
     if (!mqtt_client.connected())
-    {
       reconnect_wifi();
-    }
     mqtt_client.loop();
 
     float temp_raw = sensors.getTempCByIndex(0);
     sensors.requestTemperatures();
-
-    float temp_display = temp_raw;
-
-    // "Human Core" estimation
-    if (temp_raw > 28.0)
-      temp_display = temp_raw + 5.5;
+    float temp_display = (temp_raw > 28.0) ? (temp_raw + 5.5) : temp_raw;
     if (temp_raw == -127.00)
-      temp_display = 0.0; // Error handling
+      temp_display = 0.0;
 
-    // 2. Read Alcohol
     int alcohol_value = analogRead(MQ3_PIN);
-    // Dynamic Baseline (Auto-Calibration)
     if (alcohol_value < mq3_baseline)
       mq3_baseline = alcohol_value;
 
-    // 3. Determine Alcohol Status
     String alcohol_status = "Clean";
     if (alcohol_value >= (mq3_baseline + 400) && alcohol_value < (mq3_baseline + 2000))
       alcohol_status = "Detected";
@@ -262,7 +252,7 @@ void loop()
 
     mqtt_client.publish("health/stats", payload.c_str());
 
-    // print to serial (CSV format without labels)
+    // CSV format output
     Serial.print(temp_display);
     Serial.print(",");
     Serial.print(alcohol_value);
