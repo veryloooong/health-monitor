@@ -9,29 +9,29 @@
 #include <Wire.h>
 
 // wifi config
-const char *ssid = "Xiaomi 15";             // WIFI NAME
-const char *password = "12345678999";       // WIFI PASSWORD
-const char *mqtt_server = "10.247.128.181"; // PC IP ADDRESS (Updated from your latest upload)
+const char *ssid = "Xiaomi 15";
+const char *password = "12345678999";
+const char *mqtt_server = "10.77.88.181";
 
 // defines
-#define MQ3_PIN 36                    // MQ-3 Analog (Voltage Divider) -> GPIO 36
-#define ONE_WIRE_BUS 4                // DS18B20 Data -> GPIO 4
-#define MESSAGE_DELAY_TIME_MS 2000    // 2 seconds
-#define FINGER_DETECT_THRESHOLD 50000 // IR value threshold for finger detection
-#define SPO2_SAMPLE_SIZE 100          // Number of samples for SpO2 calculation
+#define MQ3_PIN 36     // MQ-3 -> GPIO 36
+#define ONE_WIRE_BUS 4 // DS18B20 Data -> GPIO 4
+#define MESSAGE_DELAY_TIME_MS 2000
+#define FINGER_DETECT_THRESHOLD 50000
+#define SPO2_SAMPLE_SIZE 100
 
 // objects
 WiFiClient wifi_client;
 PubSubClient mqtt_client(wifi_client);
 OneWire onewire(ONE_WIRE_BUS);
-DallasTemperature sensors(&onewire);
-MAX30105 particle_sensor;
+DallasTemperature sensors(&onewire); // DS18B20 temp sensor
+MAX30105 particle_sensor;            // MAX30102 heartbeat + spo2
 
 // MQ-3
 int mq3_baseline = 4095;
 
 // MAX30102 heart rate
-const byte RATE_SIZE = 10; // Increased buffer for smoother, more realistic BPM
+const byte RATE_SIZE = 10; // buffer size to calculate average bpm
 byte rates[RATE_SIZE];
 byte rate_spot = 0;
 long last_beat = 0;
@@ -71,7 +71,7 @@ void setup_wifi()
   Serial.println(WiFi.localIP());
 }
 
-void reconnect_wifi()
+void reconnect_mqtt()
 {
   if (!mqtt_client.connected())
   {
@@ -98,37 +98,25 @@ void setup()
   delay(2000);
 
   // 1. Setup MQ-3
-  analogReadResolution(12);
+  analogReadResolution(12); // only read 0-4095
 
   // 2. Setup DS18B20
   sensors.begin();
   sensors.setWaitForConversion(false);
   sensors.requestTemperatures();
 
-  // 3. Setup MAX30102 with High Sensitivity Settings
-  if (!particle_sensor.begin(Wire, I2C_SPEED_FAST))
-  {
-    Serial.println("MAX30102 not found.");
-  }
-  else
-  {
-    Serial.println("MAX30102 found. Configuring High Sensitivity...");
+  // 3. Setup MAX30102
+  particle_sensor.begin(Wire, I2C_SPEED_FAST);
 
-    // Explicit setup for Heart Rate + SpO2
-    // Power Level: 0x1F (~6.4mA) - 0x24 (~7.6mA) is the sweet spot for fingertips
-    byte ledBrightness = 0x24;
-    byte sampleAverage = 4; // Average 4 samples per read
-    byte ledMode = 2;       // Red + IR
-    int sampleRate = 400;   // Higher sample rate = better peak detection
-    int pulseWidth = 411;
-    int adcRange = 4096;
-
-    particle_sensor.setup(ledBrightness, sampleAverage, ledMode, sampleRate, pulseWidth, adcRange);
-
-    // Ensure IR LED is also powered up (essential for checkForBeat)
-    particle_sensor.setPulseAmplitudeIR(ledBrightness);
-    particle_sensor.setPulseAmplitudeRed(ledBrightness);
-  }
+  byte led_brightness = 0x24;
+  byte sample_average = 4;
+  byte led_mode = 2; // IR LED
+  int sample_rate = 400;
+  int pulse_width = 411;
+  int adc_range = 4096;
+  particle_sensor.setup(led_brightness, sample_average, led_mode, sample_rate, pulse_width, adc_range);
+  particle_sensor.setPulseAmplitudeIR(led_brightness);
+  particle_sensor.setPulseAmplitudeRed(led_brightness);
 
   setup_wifi();
   mqtt_client.setServer(mqtt_server, 1883);
@@ -136,11 +124,11 @@ void setup()
 
 void loop()
 {
-  // Fast loop for heart rate & SpO2
+  // fast loop for heartbeat, spo2
   long ir_value = particle_sensor.getIR();
   long red_value = particle_sensor.getRed();
 
-  // 1. Heart Rate Logic
+  // heartbeat
   if (checkForBeat(ir_value) == true)
   {
     long delta = millis() - last_beat;
@@ -148,12 +136,14 @@ void loop()
 
     bpm_current = 60 / (delta / 1000.0);
 
-    // Realistic human range check
+    // realistic heart rate
     if (bpm_current < 220 && bpm_current > 40)
     {
+      // add to rates array
       rates[rate_spot++] = (byte)bpm_current;
       rate_spot %= RATE_SIZE;
 
+      // calculate average bpm
       bpm_average = 0;
       for (byte x = 0; x < RATE_SIZE; x++)
         bpm_average += rates[x];
@@ -161,7 +151,7 @@ void loop()
     }
   }
 
-  // 2. SpO2 Logic
+  // spo2
   if (ir_value > FINGER_DETECT_THRESHOLD)
   {
     average_red = 0.95 * average_red + 0.05 * red_value;
@@ -193,23 +183,22 @@ void loop()
       spo2_counter = 0;
     }
   }
-  else
+  else // no finger = zero all data
   {
     e_spo2 = 0.0;
     bpm_average = 0;
-    // Clear HR buffer when finger is removed to prevent old stale averages
     for (int i = 0; i < RATE_SIZE; i++)
       rates[i] = 0;
   }
 
-  // Slow loop for other sensors and MQTT
+  // slow loop for alcohol / temp / MQTT
   long now = millis();
   if (now - last_msg_time > MESSAGE_DELAY_TIME_MS)
   {
     last_msg_time = now;
 
     if (!mqtt_client.connected())
-      reconnect_wifi();
+      reconnect_mqtt();
     mqtt_client.loop();
 
     float temp_raw = sensors.getTempCByIndex(0);
@@ -230,6 +219,7 @@ void loop()
 
     String finger_status = (ir_value > FINGER_DETECT_THRESHOLD) ? "true" : "false";
 
+    // create payload, send data to MQTT
     String payload = "{";
     payload += "\"temp\":";
     payload += String(temp_display);
@@ -252,7 +242,7 @@ void loop()
 
     mqtt_client.publish("health/stats", payload.c_str());
 
-    // CSV format output
+    // print live to serial
     Serial.print(temp_display);
     Serial.print(",");
     Serial.print(alcohol_value);
